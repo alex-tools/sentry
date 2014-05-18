@@ -13,17 +13,18 @@ import itertools
 import re
 import urlparse
 import warnings
+from urllib import urlencode
 
 from pygments import highlight
-# from pygments.lexers import get_lexer_for_filename, TextLexer, ClassNotFound
 from pygments.lexers import TextLexer
 from pygments.formatters import HtmlFormatter
-from urllib import urlencode
 
 from django.http import QueryDict
 from django.utils.html import escape
 from django.utils.safestring import mark_safe
 from django.utils.translation import ugettext as _
+
+import six
 
 from sentry.app import env
 from sentry.models import UserOption
@@ -190,7 +191,7 @@ class Interface(object):
         body = self.to_string(event)
         if not body:
             return ''
-        return '<pre>%s</pre>' % (escape(body).replace('\n', '<br>'),)
+        return '<pre>%s</pre>' % escape(body)
 
     def get_slug(self):
         return type(self).__name__.lower()
@@ -218,6 +219,18 @@ class Interface(object):
             #     'field": ['...'],
             # },
         }
+
+    def get_type_name(self):
+        """
+        Passed into the JSON api as the name of this interface in the entry list.
+        """
+        return self.get_slug()
+
+    def get_json_context(self):
+        """
+        Passed into the JSON api as the body for this entry.
+        """
+        return self.serialize()
 
 
 class Message(Interface):
@@ -363,10 +376,11 @@ class Frame(object):
         This is one of the few areas in Sentry that isn't platform-agnostic.
         """
         output = []
-        if self.module:
-            output.append(self.module)
-        elif self.filename and not self.is_url():
-            output.append(remove_filename_outliers(self.filename))
+        if not self.is_url():
+            if self.module:
+                output.append(self.module)
+            elif self.filename:
+                output.append(remove_filename_outliers(self.filename))
 
         if self.context_line is None:
             can_use_context = False
@@ -613,7 +627,7 @@ class Stacktrace(Interface):
         if len(frames) == system_frames:
             system_frames = 0
 
-        # if theres no system frames, pretend they're all part of the app
+        # if there's no system frames, pretend they're all part of the app
         if not system_frames:
             for frame in frames:
                 frame['in_app'] = True
@@ -1049,7 +1063,7 @@ class Http(Interface):
         #  a=b&c=d
         # and
         #  a=b; c=d
-        if isinstance(self.cookies, basestring):
+        if isinstance(self.cookies, six.string_types):
             self.cookies = dict(urlparse.parse_qsl(self.cookies, keep_blank_values=True))
         # if cookies were [also] included in headers we
         # strip them out
@@ -1136,6 +1150,37 @@ class Http(Interface):
                 'url': [self.short_url],
             }
         }
+
+    def get_type_name(self):
+        return 'http_request'
+
+    def get_json_context(self):
+        data = self.data
+        headers_is_dict, headers = self._to_dict(self.headers)
+
+        # educated guess as to whether the body is normal POST data
+        if headers_is_dict and headers.get('Content-Type') == 'application/x-www-form-urlencoded' and '=' in data:
+            _, data = self._to_dict(data)
+
+        context = {
+            'url': self.url,
+            'shortUrl': self.short_url,
+            'method': self.method,
+            'queryString': self.query_string or None,
+            'fragment': self.fragment or None,
+            'headers': self.headers or None,
+        }
+
+        # It's kind of silly we store this twice
+        _, cookies = self._to_dict(self.cookies)
+
+        context.update({
+            'cookies': cookies or None,
+            'env': self.env or None,
+            'body': data or None,
+        })
+
+        return context
 
 
 class Template(Interface):
